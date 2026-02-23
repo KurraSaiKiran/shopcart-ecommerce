@@ -1,0 +1,10 @@
+pandas 
+sqlalchemy 
+pymysql 
+python-dotenv
+cryptography
+faker
+fastapi 
+uvicorn 
+scikit-learn 
+scipy
