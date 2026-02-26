@@ -28,20 +28,20 @@ DB_NAME     = os.getenv("DB_NAME",     "your_database")
 DB_USER     = os.getenv("DB_USER",     "your_username")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "your_password")
 
-# File paths — update these to match where your CSVs are stored
-CATEGORIES_CSV  = "amazon_categories.csv"
-PRODUCTS_CSV    = "amazon_products.csv"
+# File paths
+CATEGORIES_CSV  = os.getenv("CATEGORIES_CSV",  "amazon_categories.csv")
+PRODUCTS_CSV    = os.getenv("PRODUCTS_CSV",    "amazon_products.csv")
 
 # Target table names in MySQL
-CATEGORIES_TABLE = "amazon_categories"
-PRODUCTS_TABLE   = "amazon_products"
+CATEGORIES_TABLE = os.getenv("CATEGORIES_TABLE", "amazon_categories")
+PRODUCTS_TABLE   = os.getenv("PRODUCTS_TABLE",   "amazon_products")
 
-# How to handle existing tables: "replace" | "append" | "fail"
-IF_EXISTS  = "replace"
+# How to handle existing tables
+IF_EXISTS  = os.getenv("IF_EXISTS", "replace")
 
 # Rows per chunk when reading the large products file
-READ_CHUNK_SIZE  = 50_000   # how many rows to read from CSV at a time
-WRITE_CHUNK_SIZE = 1_000    # how many rows to write per INSERT batch
+READ_CHUNK_SIZE  = int(os.getenv("READ_CHUNK_SIZE", 50000))
+WRITE_CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", 1000))
 
 
 # ── Engine ─────────────────────────────────────────────────────────────────────
