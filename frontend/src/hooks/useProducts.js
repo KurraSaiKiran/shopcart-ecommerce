@@ -6,14 +6,34 @@ export const useProducts = () => {
     const [categories, setCategories] = useState([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
-    const [stats, setStats] = useState({});
     const [selectedCategory, setSelectedCategory] = useState(null);
     const [page, setPage] = useState(1);
+    const [searchQuery, setSearchQuery] = useState('');
+    const [priceRange, setPriceRange] = useState({ min: null, max: null });
+    const [minRating, setMinRating] = useState(null);
 
     const refreshProducts = useCallback(async () => {
         try {
             setLoading(true);
-            const data = await ProductService.getProducts(page, 20, selectedCategory);
+            
+            let url;
+            const hasFilters = searchQuery || selectedCategory || priceRange.min !== null || priceRange.max !== null || minRating !== null;
+            
+            if (hasFilters) {
+                url = `http://127.0.0.1:8005/products/search?page=${page}&limit=20`;
+                if (searchQuery) url += `&q=${encodeURIComponent(searchQuery)}`;
+                if (selectedCategory) url += `&category_id=${selectedCategory}`;
+                if (priceRange.min !== null) url += `&min_price=${priceRange.min}`;
+                if (priceRange.max !== null) url += `&max_price=${priceRange.max}`;
+                if (minRating !== null) url += `&min_rating=${minRating}`;
+            } else {
+                url = `http://127.0.0.1:8005/products?page=${page}&limit=20`;
+            }
+            
+            const response = await fetch(url);
+            if (!response.ok) throw new Error('Failed to fetch products');
+            
+            const data = await response.json();
             setProducts(data.products || []);
             setError(null);
         } catch (err) {
@@ -21,16 +41,12 @@ export const useProducts = () => {
         } finally {
             setLoading(false);
         }
-    }, [page, selectedCategory]);
+    }, [page, selectedCategory, searchQuery, priceRange, minRating]);
 
     const loadInitialData = async () => {
         try {
-            const [cats, statData] = await Promise.all([
-                ProductService.getCategories(),
-                ProductService.getStats()
-            ]);
+            const cats = await ProductService.getCategories();
             setCategories(cats);
-            setStats(statData);
         } catch (err) {
             setError(err.message);
         }
@@ -44,58 +60,21 @@ export const useProducts = () => {
         refreshProducts();
     }, [refreshProducts]);
 
-    const [notification, setNotification] = useState(null);
-
-    const notify = (message, type = 'success') => {
-        setNotification({ message, type });
-    };
-
-    const clearNotification = () => setNotification(null);
-
-    const removeProduct = async (asin) => {
-        if (!window.confirm('Are you sure you want to delete this product?')) return;
-        try {
-            await ProductService.deleteProduct(asin);
-            refreshProducts();
-            setStats(prev => ({ ...prev, total_products: prev.total_products - 1 }));
-            notify(`Product ${asin} deleted successfully`, 'info');
-        } catch (err) {
-            notify(err.message, 'error');
-        }
-    };
-
-    const saveProduct = async (formData, isEdit) => {
-        try {
-            if (isEdit) {
-                await ProductService.updateProduct(formData.asin, formData);
-                notify('Product updated successfully');
-            } else {
-                await ProductService.createProduct(formData);
-                setStats(prev => ({ ...prev, total_products: prev.total_products + 1 }));
-                notify('New product published successfully');
-            }
-            refreshProducts();
-            return true;
-        } catch (err) {
-            notify(err.message, 'error');
-            return false;
-        }
-    };
-
     return {
         products,
         categories,
         loading,
         error,
-        stats,
         selectedCategory,
         setSelectedCategory,
         page,
         setPage,
-        notification,
-        clearNotification,
-        refreshProducts,
-        removeProduct,
-        saveProduct
+        searchQuery,
+        setSearchQuery,
+        priceRange,
+        setPriceRange,
+        minRating,
+        setMinRating,
+        refreshProducts
     };
 };

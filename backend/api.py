@@ -17,6 +17,7 @@ import pandas as pd
 import logging
 from datetime import datetime
 import os
+from recommendation_engine import RecommendationEngine
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -45,6 +46,7 @@ app.add_middleware(
 state = {
     "engine":            None,
     "ready":             False,
+    "recommender":       None,
 }
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -62,7 +64,11 @@ def query_db(sql: str, params: dict = {}) -> pd.DataFrame:
 
 def build_engine():
     from sqlalchemy import create_engine
-    url = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    from urllib.parse import quote_plus
+    
+    # URL-encode the password to handle special characters like @
+    encoded_password = quote_plus(DB_PASSWORD)
+    url = f"mysql+pymysql://{DB_USER}:{encoded_password}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     return create_engine(url, pool_pre_ping=True)
 
 # ── Startup: Connect DB ──────────────────────────────────────────
@@ -76,8 +82,10 @@ def startup():
     logger.info("✓ Connected to RDS")
 
     state["engine"]            = engine
+    state["recommender"]       = RecommendationEngine(engine)
     state["ready"]             = True
     logger.info("✓ API ready")
+    logger.info("✓ Recommendation engine initialized")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -103,6 +111,77 @@ def health_check():
 # 2. PRODUCTS (CRUD)
 # ══════════════════════════════════════════════════════════════════════════════
 
+@app.get("/products/search", tags=["Products"])
+def search_products(
+    q: str = Query(default="", description="Search query"),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=20, ge=1, le=100),
+    category_id: int = Query(default=None),
+    min_price: float = Query(default=None),
+    max_price: float = Query(default=None),
+    min_rating: float = Query(default=None),
+):
+    """Search products with filters."""
+    offset = (page - 1) * limit
+    where_clauses = []
+    params = {"limit": limit, "offset": offset}
+    
+    if q:
+        where_clauses.append("(title LIKE :search OR asin LIKE :search)")
+        params["search"] = f"%{q}%"
+    
+    if category_id:
+        where_clauses.append("category_id = :cat_id")
+        params["cat_id"] = category_id
+    
+    if min_price is not None:
+        where_clauses.append("price >= :min_price")
+        params["min_price"] = min_price
+    
+    if max_price is not None:
+        where_clauses.append("price <= :max_price")
+        params["max_price"] = max_price
+    
+    if min_rating is not None:
+        where_clauses.append("stars >= :min_rating")
+        params["min_rating"] = min_rating
+    
+    where_clause = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+    
+    sql = f"""
+        SELECT 
+            asin, title, stars, reviews, price, category_id, img_url
+        FROM amazon_products 
+        {where_clause} 
+        LIMIT :limit OFFSET :offset
+    """
+    
+    count_sql = f"SELECT COUNT(*) FROM amazon_products {where_clause}"
+    
+    try:
+        with state["engine"].connect() as conn:
+            count_params = {k: v for k, v in params.items() if k not in ['limit', 'offset']}
+            total = conn.execute(text(count_sql), count_params).scalar()
+            df = pd.read_sql(text(sql), conn, params=params)
+        
+        products = df.fillna("N/A").to_dict(orient="records")
+        for product in products:
+            if product.get('price') and product['price'] != 'N/A':
+                import random
+                discount_factor = random.uniform(1.2, 1.5)
+                product['original_price'] = round(float(product['price']) * discount_factor, 2)
+        
+        return {
+            "page": page,
+            "limit": limit,
+            "total_results": int(total),
+            "query": q,
+            "products": products
+        }
+    except Exception as e:
+        logger.error(f"Search failed: {e}")
+        return {"page": page, "limit": limit, "total_results": 0, "query": q, "products": []}
+
 @app.get("/products", tags=["Products"])
 def get_products(
     page:  int = Query(default=1, ge=1),
@@ -118,25 +197,33 @@ def get_products(
         where_clause = "WHERE category_id = :cat_id"
         params["cat_id"] = category_id
 
-    # img_url is now the primary column name in DB
     sql = f"""
         SELECT 
-            asin, title, stars, reviews, price, category_id,
-            img_url, video_url
+            asin, title, stars, reviews, price, category_id, img_url
         FROM amazon_products 
         {where_clause} 
         LIMIT :limit OFFSET :offset
     """
+    
+    count_sql = f"SELECT COUNT(*) FROM amazon_products {where_clause}"
+    
     try:
         with state["engine"].connect() as conn:
-            logger.info(f"Querying products: {sql} with params {params}")
+            total = conn.execute(text(count_sql), {k: v for k, v in params.items() if k == "cat_id"}).scalar()
             df = pd.read_sql(text(sql), conn, params=params)
-            logger.info(f"Query returned {len(df)} rows")
+        
+        products = df.fillna("N/A").to_dict(orient="records")
+        for product in products:
+            if product.get('price') and product['price'] != 'N/A':
+                import random
+                discount_factor = random.uniform(1.2, 1.5)
+                product['original_price'] = round(float(product['price']) * discount_factor, 2)
+        
         return {
             "page": page,
             "limit": limit,
-            "total_results": len(df),
-            "products": df.fillna("N/A").to_dict(orient="records")
+            "total_results": int(total),
+            "products": products
         }
     except Exception as e:
         logger.error(f"Products query failed: {e}")
@@ -161,7 +248,6 @@ def create_product(product: dict):
             
     try:
         with state["engine"].begin() as conn:
-            # Dynamically build the insert using keys directly
             cols = ", ".join(product.keys())
             placeholders = ", ".join([f":{k}" for k in product.keys()])
             sql = text(f"INSERT INTO amazon_products ({cols}) VALUES ({placeholders})")
@@ -269,6 +355,105 @@ def get_stats():
             stats[key] = float(result) if result is not None else 0
 
     return stats
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. RECOMMENDATIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/recommendations/collaborative/{user_id}", tags=["Recommendations"])
+def get_collaborative_recommendations(user_id: int, limit: int = Query(default=10, ge=1, le=50)):
+    """
+    Collaborative Filtering: "Users like you bought this"
+    Recommends products based on similar users' preferences.
+    """
+    try:
+        recommendations = state["recommender"].collaborative_filtering(user_id, top_n=limit)
+        return {
+            "user_id": user_id,
+            "method": "collaborative_filtering",
+            "description": "Users like you bought this",
+            "recommendations": recommendations
+        }
+    except Exception as e:
+        logger.error(f"Collaborative filtering failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/recommendations/similar/{product_id}", tags=["Recommendations"])
+def get_similar_products(product_id: str, limit: int = Query(default=10, ge=1, le=50)):
+    """
+    Content-Based Filtering: "Similar products to this one"
+    Recommends products similar to the given product.
+    """
+    try:
+        recommendations = state["recommender"].content_based_filtering(product_id, top_n=limit)
+        return {
+            "product_id": product_id,
+            "method": "content_based_filtering",
+            "description": "Similar products to this one",
+            "recommendations": recommendations
+        }
+    except Exception as e:
+        logger.error(f"Content-based filtering failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/recommendations/hybrid/{user_id}", tags=["Recommendations"])
+def get_hybrid_recommendations(
+    user_id: int,
+    product_id: str = Query(default=None),
+    limit: int = Query(default=10, ge=1, le=50)
+):
+    """
+    Hybrid Recommendations: Combines collaborative and content-based filtering.
+    Provides the best of both worlds.
+    """
+    try:
+        recommendations = state["recommender"].hybrid_recommendations(
+            user_id, product_id, top_n=limit
+        )
+        return {
+            "user_id": user_id,
+            "product_id": product_id,
+            "method": "hybrid",
+            "description": "Personalized recommendations combining multiple techniques",
+            "recommendations": recommendations
+        }
+    except Exception as e:
+        logger.error(f"Hybrid recommendations failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/recommendations/similarity", tags=["Recommendations"])
+def calculate_product_similarity(product_ids: list[str]):
+    """
+    Calculate cosine similarity matrix for given products.
+    Shows mathematical similarity between products.
+    """
+    try:
+        if len(product_ids) < 2:
+            raise HTTPException(status_code=400, detail="Need at least 2 products")
+        
+        if len(product_ids) > 20:
+            raise HTTPException(status_code=400, detail="Maximum 20 products allowed")
+        
+        result = state["recommender"].product_similarity_matrix(product_ids)
+        
+        if result is None:
+            raise HTTPException(status_code=404, detail="Products not found")
+        
+        return {
+            "method": "cosine_similarity",
+            "description": "Mathematical similarity calculation between products",
+            "products": result['products'],
+            "similarity_matrix": result['similarity_matrix']
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Similarity calculation failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Run ────────────────────────────────────────────────────────────────────────
