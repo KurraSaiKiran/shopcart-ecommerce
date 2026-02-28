@@ -35,11 +35,12 @@ class RecommendationEngine:
         Uses user-item interaction matrix and cosine similarity.
         """
         try:
-            # Build user-item matrix from ratings/interactions
+            # Build user-item matrix from ratings/interactions (limit to recent data)
             with self.engine.connect() as conn:
                 query = """
                     SELECT user_id, product_id, rating
                     FROM product_ratings
+                    LIMIT 5000
                 """
                 df = pd.read_sql(text(query), conn)
             
@@ -99,8 +100,19 @@ class RecommendationEngine:
         Uses product features (title, category, price range) and TF-IDF.
         """
         try:
-            # Fetch all products with features
+            # First get the target product's category
             with self.engine.connect() as conn:
+                target_query = """
+                    SELECT category_id FROM amazon_products WHERE asin = :pid
+                """
+                target_df = pd.read_sql(text(target_query), conn, params={'pid': product_id})
+                
+                if target_df.empty:
+                    return []
+                
+                category_id = target_df.iloc[0]['category_id']
+                
+                # Fetch products from same category only (much smaller dataset)
                 query = """
                     SELECT 
                         p.asin,
@@ -110,9 +122,10 @@ class RecommendationEngine:
                         c.category_name
                     FROM amazon_products p
                     LEFT JOIN amazon_categories c ON p.category_id = c.id
-                    LIMIT 10000
+                    WHERE p.category_id = :cat_id
+                    LIMIT 500
                 """
-                df = pd.read_sql(text(query), conn)
+                df = pd.read_sql(text(query), conn, params={'cat_id': category_id})
             
             if df.empty or product_id not in df['asin'].values:
                 return []
@@ -124,8 +137,8 @@ class RecommendationEngine:
                 df['price'].astype(str)
             )
             
-            # Create TF-IDF matrix
-            tfidf = TfidfVectorizer(max_features=500, stop_words='english')
+            # Create TF-IDF matrix with reduced features
+            tfidf = TfidfVectorizer(max_features=100, stop_words='english')
             tfidf_matrix = tfidf.fit_transform(df['features'])
             
             # Find the product index
